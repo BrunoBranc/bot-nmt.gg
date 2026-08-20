@@ -72,6 +72,39 @@ class NMTBotApp(ctk.CTk):
         )
         self.connection_label.grid(row=0, column=1, padx=10, sticky="e")
 
+        # Versao atual
+        try:
+            from version import __version__
+            ver_text = f"v{__version__}"
+        except ImportError:
+            ver_text = ""
+        ctk.CTkLabel(
+            header, text=ver_text,
+            font=ctk.CTkFont(size=10), text_color="gray"
+        ).grid(row=1, column=1, padx=10, sticky="e")
+
+        # Banner de atualizacao (oculto ate haver update)
+        self._update_banner = ctk.CTkFrame(self, fg_color="#2a6496", corner_radius=8)
+        self._update_banner.grid_columnconfigure(0, weight=1)
+        self._update_label = ctk.CTkLabel(
+            self._update_banner,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="white",
+        )
+        self._update_label.grid(row=0, column=0, padx=12, pady=6, sticky="w")
+        self._update_btn = ctk.CTkButton(
+            self._update_banner,
+            text="Baixar agora",
+            width=110,
+            fg_color="#1a4a6e",
+            hover_color="#0d3050",
+            command=self._open_update_url,
+        )
+        self._update_btn.grid(row=0, column=1, padx=8, pady=6)
+        self._update_url = ""
+        # Banner começa oculto — aparece só quando há update
+
         # Abas principais
         self.tabview = ctk.CTkTabview(self)
         self.tabview.grid(row=2, column=0, padx=25, pady=10, sticky="nsew")
@@ -91,9 +124,17 @@ class NMTBotApp(ctk.CTk):
         self._load_settings_to_ui()
 
         self.log("Aplicacao iniciada.")
-        self.log("Clique em Abrir Navegador para abrir o nmt.gg.")    # ------------------------------------------------------------------
-    # UI Builders
-    # ------------------------------------------------------------------
+        self.log("Clique em Abrir Navegador para abrir o nmt.gg.")
+
+        # Verifica atualizacoes em background
+        try:
+            from updater import check_for_update
+            check_for_update(
+                on_update_available=self._show_update_banner,
+                on_error=lambda e: None,
+            )
+        except ImportError:
+            pass
     def _build_control_tab(self) -> None:
         tab = self.tab_control
         tab.grid_columnconfigure(0, weight=1)
@@ -504,6 +545,23 @@ class NMTBotApp(ctk.CTk):
     # ------------------------------------------------------------------
     # Icones / Log / Geometry
     # ------------------------------------------------------------------
+    def _show_update_banner(self, new_version: str, download_url: str) -> None:
+        """Exibe o banner de atualizacao (chamado de thread em background)."""
+        def _show():
+            self._update_url = download_url
+            self._update_label.configure(
+                text=f"🆕  Nova versao disponivel: v{new_version}  —  Baixe e substitua o executavel."
+            )
+            # Insere o banner entre o header (row=0) e as abas (row=2)
+            self._update_banner.grid(row=1, column=0, padx=25, pady=(0, 5), sticky="ew")
+            self.log(f"Atualizacao disponivel: v{new_version}. Clique em 'Baixar agora' no topo.")
+        self.after(0, _show)
+
+    def _open_update_url(self) -> None:
+        import webbrowser
+        if self._update_url:
+            webbrowser.open(self._update_url)
+
     def _apply_window_icon(self) -> None:
         try:
             if _ICON_ICO.exists():

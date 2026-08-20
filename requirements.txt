@@ -1,4 +1,6 @@
-﻿playwright>=1.55,<2
+playwright>=1.55,<2
 customtkinter>=5.2,<6
 python-dotenv>=1.1,<2
 Pillow>=10.0,<12
+python-socketio[client]>=5.8,<6
+websocket-client>=1.6,<2
