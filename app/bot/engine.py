@@ -148,23 +148,74 @@ async () => {
 
 class TicketManager:
     """
-    Conecta ao socket.io do nmt.gg via Python e escuta o evento live:ticket.
-    O ticket e atualizado automaticamente sempre que o servidor emitir um novo.
-    Reconecta automaticamente se a conexao cair.
+    Gerencia o Live Ticket via Socket.IO + fallback Chrome.
+
+    Opcao 3: valida o ticket proativamente antes de cada rodada.
+             Se invalido, forca reconexao imediata do socket.
+    Opcao 4: se o socket nao entregar ticket em 10s, chama x_()
+             diretamente no Chrome via page.evaluate() como fallback.
     """
 
-    def __init__(self, base_url: str, on_log: Optional[Callable[[str], None]] = None,
-                 on_win: Optional[Callable[[dict], None]] = None):
-        self.base_url = base_url
-        self._log = on_log or (lambda _: None)
-        self._on_win = on_win  # callback quando o socket emite resultado com vitoria
+    # JS que chama x_() do modulo webpack para obter o ticket direto do Chrome
+    _JS_GET_TICKET_FROM_CHROME = """
+    async () => {
+        try {
+            // Procura o modulo que exporta x_() no cache do webpack
+            const cache = window.__webpack_require__?.c || {};
+            for (const mod of Object.values(cache)) {
+                const x_ = mod?.exports?.x_;
+                if (typeof x_ === 'function') {
+                    try {
+                        const ticket = await x_();
+                        if (ticket && typeof ticket === 'string') return ticket;
+                    } catch(e) {}
+                }
+            }
+            // Fallback: le do window.__nmtLiveTicket (patch de fetch)
+            return window.__nmtLiveTicket || null;
+        } catch(e) {
+            return null;
+        }
+    }
+    """
+
+    # JS que instala o patch de fetch para capturar ticket passivamente
+    _JS_INSTALL_FETCH_PATCH = """
+    () => {
+        if (window.__nmtPatchInstalled) return 'already';
+        const orig = window.fetch;
+        window.__nmtLiveTicket = null;
+        window.__nmtPatchInstalled = true;
+        window.fetch = function(...args) {
+            const [url, opts] = args;
+            if (opts?.headers) {
+                const t = opts.headers['X-NMT-Live-Ticket'] ||
+                    (typeof opts.headers.get === 'function'
+                        ? opts.headers.get('X-NMT-Live-Ticket') : null);
+                if (t) window.__nmtLiveTicket = t;
+            }
+            return orig.apply(this, args);
+        };
+        return 'installed';
+    }
+    """
+
+    def __init__(self, base_url: str,
+                 on_log: Optional[Callable[[str], None]] = None,
+                 on_win: Optional[Callable[[dict], None]] = None,
+                 browser: Optional["BrowserManager"] = None):
+        self.base_url  = base_url
+        self._log      = on_log or (lambda _: None)
+        self._on_win   = on_win
+        self._browser  = browser  # referencia ao BrowserManager para fallback Chrome
         self._ticket: Optional[str] = None
-        self._token: Optional[str] = None
-        self._sio: Optional[sio_lib.Client] = None
-        self._lock = threading.Lock()
-        self._connected = False
-        self._running = False
+        self._token:  Optional[str] = None
+        self._sio:    Optional[sio_lib.Client] = None
+        self._lock    = threading.Lock()
+        self._connected  = False
+        self._running    = False
         self._thread: Optional[threading.Thread] = None
+        self._last_ticket_time: float = 0.0  # quando o ultimo ticket chegou
 
     def set_token(self, token: str) -> None:
         self._token = token
@@ -176,14 +227,16 @@ class TicketManager:
     def clear_ticket(self) -> None:
         with self._lock:
             self._ticket = None
+            self._last_ticket_time = 0.0
 
     def start(self) -> None:
-        """Inicia a conexao socket.io em background."""
         if self._running:
             return
         self._running = True
         self._thread = threading.Thread(target=self._connect_loop, daemon=True)
         self._thread.start()
+        # Instala o patch de fetch no Chrome em background
+        threading.Thread(target=self._install_fetch_patch, daemon=True).start()
 
     def stop(self) -> None:
         self._running = False
@@ -193,25 +246,114 @@ class TicketManager:
         except Exception:
             pass
 
+    def is_connected(self) -> bool:
+        return self._connected
+
+    # ------------------------------------------------------------------
+    # Opcao 3: Validacao proativa do ticket
+    # ------------------------------------------------------------------
+
+    def ensure_valid_ticket(self, timeout: float = 30.0) -> Optional[str]:
+        """
+        Garante que temos um ticket valido antes de cada rodada.
+        1. Se temos ticket e socket conectado → retorna direto.
+        2. Se socket desconectado → forca reconexao e aguarda.
+        3. Se ainda sem ticket → usa fallback Chrome (opcao 4).
+        """
+        ticket = self.get_ticket()
+
+        # Ticket disponivel e socket ok → retorna direto
+        if ticket and self._connected:
+            return ticket
+
+        # Socket caiu mas temos ticket recente (< 5 min) → pode ainda ser valido
+        if ticket and (time.time() - self._last_ticket_time) < 300:
+            self._log("[Ticket] Usando ultimo ticket (socket reconectando)...")
+            return ticket
+
+        # Sem ticket ou muito antigo → aguarda reconexao + fallback Chrome
+        if not self._connected:
+            self._log("[Ticket] Socket desconectado. Aguardando reconexao...")
+
+        return self.wait_for_ticket(timeout)
+
+    # ------------------------------------------------------------------
+    # Opcao 4: Fallback via Chrome (x_() do webpack)
+    # ------------------------------------------------------------------
+
+    def _get_ticket_from_chrome(self) -> Optional[str]:
+        """Chama x_() diretamente no Chrome via page.evaluate()."""
+        if not self._browser:
+            return None
+        try:
+            page = self._browser.page
+            if not page:
+                return None
+            ticket = self._browser.run_coro(
+                page.evaluate(self._JS_GET_TICKET_FROM_CHROME)
+            )
+            if ticket:
+                self._log(f"[Ticket] Obtido via Chrome fallback ({ticket[:12]}...).")
+                with self._lock:
+                    self._ticket = ticket
+                    self._last_ticket_time = time.time()
+            return ticket
+        except Exception as e:
+            self._log(f"[Ticket] Erro no fallback Chrome: {e}")
+            return None
+
+    def _install_fetch_patch(self) -> None:
+        """Instala o patch de fetch no Chrome para captura passiva de ticket."""
+        if not self._browser:
+            return
+        try:
+            page = self._browser.page
+            if page:
+                self._browser.run_coro(page.evaluate(self._JS_INSTALL_FETCH_PATCH))
+        except Exception:
+            pass
+
     def wait_for_ticket(self, timeout: float = 30.0) -> Optional[str]:
-        """Aguarda ate o ticket estar disponivel ou timeout."""
+        """
+        Aguarda ticket do socket.io. Se nao chegar em 10s,
+        tenta o fallback Chrome (opcao 4). Repete ate timeout.
+        """
         deadline = time.time() + timeout
+        chrome_tried = False
+
         while time.time() < deadline:
             ticket = self.get_ticket()
             if ticket:
                 return ticket
+
+            # Apos 10s sem ticket, tenta o Chrome
+            if not chrome_tried and (time.time() - (deadline - timeout)) > 10:
+                chrome_tried = True
+                self._log("[Ticket] Socket lento — tentando Chrome fallback...")
+                ticket = self._get_ticket_from_chrome()
+                if ticket:
+                    return ticket
+
             time.sleep(0.5)
-        return None
+
+        # Ultima tentativa: Chrome
+        return self._get_ticket_from_chrome()
+
+    # ------------------------------------------------------------------
+    # Loop de conexao Socket.IO
+    # ------------------------------------------------------------------
 
     def _connect_loop(self) -> None:
-        """Loop de reconexao automatica."""
+        retry_delay = 5.0
         while self._running:
             try:
                 self._connect_once()
+                retry_delay = 5.0  # reset apos conexao bem sucedida
             except Exception as e:
-                self._log(f"[SocketIO] Erro: {e}. Reconectando em 10s...")
+                self._log(f"[SocketIO] Erro: {e}. Reconectando em {retry_delay:.0f}s...")
             if self._running:
-                time.sleep(10)
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 1.5, 60.0)  # backoff ate 60s
 
     def _connect_once(self) -> None:
         if not self._token:
@@ -227,17 +369,15 @@ class TicketManager:
         def connect():
             self._connected = True
             self._log("[SocketIO] Conectado ao nmt.gg.")
-            # Pede ao servidor para emitir um novo ticket imediatamente
             try:
                 client.emit("live:request-ticket")
             except Exception:
-                pass  # nem todo servidor suporta — ticket virá no proximo ciclo normal
+                pass
 
         @client.event
         def disconnect():
             self._connected = False
-            self._log("[SocketIO] Desconectado. Mantendo ultimo ticket ate reconexao.")
-            # NAO limpa o ticket — o ultimo ticket pode ainda ser valido
+            self._log("[SocketIO] Desconectado. Mantendo ultimo ticket.")
 
         @client.on("live:ticket")
         def on_ticket(data):
@@ -249,22 +389,16 @@ class TicketManager:
             if ticket:
                 with self._lock:
                     self._ticket = ticket
-                self._log(f"[SocketIO] Novo ticket recebido ({ticket[:12]}...).")
-
-        @client.on("round-settled")
-        def on_round_settled(data):
-            if self._on_win and isinstance(data, dict):
-                self._on_win({"type": "round-settled", **data})
+                    self._last_ticket_time = time.time()
+                self._log(f"[SocketIO] Ticket recebido ({ticket[:12]}...).")
 
         @client.on("pb-user-settled")
         def on_pb_user_settled(data):
-            """Dispara SOMENTE quando o usuario atual ganhou NMT."""
             if self._on_win and isinstance(data, dict):
                 self._on_win({"type": "pb-user-settled", **data})
 
         @client.on("notification")
         def on_notification(data):
-            """Notificacao do servidor — captura vitorias do tipo POWERBLOCK_WIN."""
             if not self._on_win or not isinstance(data, dict):
                 return
             notif = data.get("notification", {})
@@ -278,7 +412,6 @@ class TicketManager:
             auth={"token": self._token},
             wait_timeout=15,
         )
-        # Mantém conectado enquanto bot roda
         while self._running and self._connected:
             time.sleep(1)
         client.disconnect()
@@ -625,6 +758,7 @@ class BotEngine:
                 base_url=self.url,
                 on_log=lambda msg: self._emit(msg),
                 on_win=self._on_socket_win,
+                browser=self.browser,
             )
             self._ticket_mgr.set_token(self._api._token)
             self._ticket_mgr.start()
@@ -704,13 +838,13 @@ class BotEngine:
                 if ends_in < 8:
                     self._emit(f"Tempo restante muito curto ({ends_in}s), pulando.")
                 else:
-                    # Captura o ticket antes de colocar figuras (se nao tiver ainda)
-                    if not self._api.has_ticket():
-                        if not self._acquire_ticket():
-                            self._emit("Nao foi possivel obter o Live Ticket. Coloque uma figura manualmente para o bot captura-lo.")
-                            last_action_round = round_id
-                            self._sleep(self.poll_interval)
-                            continue
+                    # Opcao 3+4: valida ticket proativamente antes de cada rodada
+                    ticket = self._ticket_mgr.ensure_valid_ticket(timeout=30.0) if self._ticket_mgr else None
+                    if not ticket:
+                        self._emit("Sem ticket valido. Pulando rodada...")
+                        last_action_round = round_id
+                        self._sleep(self.poll_interval)
+                        continue
 
                     occupied = _occupied_cells(current)
                     self._emit(f"Celulas ocupadas: {len(occupied)} | Colocando figuras...")
@@ -736,23 +870,14 @@ class BotEngine:
 
     def _acquire_ticket(self) -> bool:
         """
-        Obtém o Live Ticket do TicketManager (socket.io).
-        O servidor emite live:ticket automaticamente ao conectar.
-        Aguarda ate 60s para o ticket chegar apos reconexao.
+        Garante um ticket valido usando opcoes 3 e 4:
+        - Opcao 3: valida proativamente, forca reconexao se necessario
+        - Opcao 4: fallback direto via Chrome se socket lento/falho
         """
-        # Tenta ler ticket ja disponivel (pode ser o ultimo valido)
-        ticket = self._ticket_mgr.get_ticket() if self._ticket_mgr else None
+        ticket = self._ticket_mgr.ensure_valid_ticket(timeout=60.0) if self._ticket_mgr else None
         if ticket:
             return True
-
-        # Aguarda ate 60s — o servidor emite o ticket ao reconectar
-        self._emit("Aguardando ticket do socket.io (ate 60s)...")
-        ticket = self._ticket_mgr.wait_for_ticket(60.0) if self._ticket_mgr else None
-        if ticket:
-            self._emit(f"Ticket recebido ({ticket[:12]}...).")
-            return True
-
-        self._emit("Ticket nao chegou. Verifique a conexao com o nmt.gg.")
+        self._emit("Nao foi possivel obter ticket. Verifique a conexao.")
         return False
 
     def _on_socket_win(self, data: dict) -> None:
