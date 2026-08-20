@@ -1,0 +1,102 @@
+{
+  "agent_id": "qa",
+  "version": "1.0",
+  "display_name": "QA",
+  "capabilities": [
+    {
+      "id": "verify_feature",
+      "category": "verify",
+      "description": "Evaluate implementation against acceptance criteria and risk.",
+      "inputs": [
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/briefings/{slug}/briefings.md",
+          "required": false
+        },
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/context/prd-{slug}.md",
+          "required": true
+        },
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/context/implementation-plan-{slug}.md",
+          "required": true
+        },
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/context/reviews/{slug}/reports/sheldon-*.json",
+          "required": true
+        },
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/briefings/{slug}/prototype.html",
+          "required": false
+        },
+        {
+          "type": "artifact",
+          "path_pattern": "src/**/*",
+          "required": false
+        },
+        {
+          "type": "gate",
+          "path_pattern": "gate:D",
+          "required": false
+        }
+      ],
+      "outputs": [
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/context/qa-report-{slug}.md"
+        },
+        {
+          "type": "gate",
+          "path_pattern": "gate:D"
+        }
+      ]
+    },
+    {
+      "id": "reflect_memory",
+      "category": "transform",
+      "description": "Update bootstrap/*.md after a relevant session by consuming reflect-prompt.json and running memory:reflect-commit.",
+      "inputs": [
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/runtime/reflect-prompt.json",
+          "required": true
+        },
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/context/bootstrap/*.md",
+          "required": false
+        }
+      ],
+      "outputs": [
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/context/bootstrap/current-state.md"
+        },
+        {
+          "type": "artifact",
+          "path_pattern": ".aioson/context/bootstrap/what-it-does.md"
+        },
+        {
+          "type": "event",
+          "path_pattern": "runtime:memory_reflect_committed"
+        }
+      ],
+      "trigger": "post_agent_done",
+      "tier": "tier2_notified"
+    }
+  ],
+  "autonomy_modes": [
+    "guarded"
+  ],
+  "default_mode": "guarded",
+  "supported_tools": [
+    "codex",
+    "claude",
+    "opencode"
+  ],
+  "risk_profile": "low"
+}

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "_about": "Canonical compact workflow. Full means every specialist remains available as an explicit or evidence-triggered detour; it does not add classification-driven document stages.",
+  "feature": {
+    "MICRO": ["product", "planner", "dev", "qa"],
+    "SMALL": ["product", "planner", "dev", "qa"],
+    "MEDIUM": ["product", "planner", "dev", "qa"]
+  },
+  "project": {
+    "MICRO": ["setup", "product", "planner", "dev", "qa"],
+    "SMALL": ["setup", "product", "planner", "dev", "qa"],
+    "MEDIUM": ["setup", "product", "planner", "dev", "qa"]
+  },
+  "rules": { "required": ["dev"], "allowDetours": true }
+}

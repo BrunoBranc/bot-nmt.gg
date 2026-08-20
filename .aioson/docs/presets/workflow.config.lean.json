@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "_about": "Lean lane preset. Copy to .aioson/context/workflow.config.json to opt in. See .aioson/docs/workflow-lean-lane.md. Runtime smoke gate stays mandatory in both lanes.",
+  "feature": {
+    "MICRO": ["product", "planner", "dev", "qa"],
+    "SMALL": ["product", "planner", "dev", "qa"],
+    "MEDIUM": ["product", "planner", "dev", "qa"]
+  },
+  "project": {
+    "MICRO": ["setup", "product", "planner", "dev", "qa"],
+    "SMALL": ["setup", "product", "planner", "dev", "qa"],
+    "MEDIUM": ["setup", "product", "planner", "dev", "qa"]
+  },
+  "rules": { "required": ["dev"], "allowDetours": true }
+}

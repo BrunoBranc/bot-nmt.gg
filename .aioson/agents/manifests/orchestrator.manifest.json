@@ -1,0 +1,19 @@
+{
+  "agent_id": "orchestrator",
+  "version": "2.0",
+  "display_name": "Orchestrator",
+  "capabilities": [{
+    "id": "coordinate_parallel_execution",
+    "category": "orchestrate",
+    "description": "Coordinate explicitly requested, genuinely parallel or cross-cutting approved plan phases.",
+    "inputs": [
+      { "type": "artifact", "path_pattern": ".aioson/context/prd-{slug}.md", "required": true },
+      { "type": "artifact", "path_pattern": ".aioson/context/implementation-plan-{slug}.md", "required": true }
+    ],
+    "outputs": []
+  }],
+  "autonomy_modes": ["guarded", "trusted"],
+  "default_mode": "guarded",
+  "supported_tools": ["codex", "claude", "opencode"],
+  "risk_profile": "medium"
+}
