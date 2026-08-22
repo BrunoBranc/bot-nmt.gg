@@ -28,6 +28,48 @@ CURRENT_PATH = "/api/power-blocks/current"
 FIGURES_PATH = "/api/figures?skip=0&take=100"
 PLACE_PATH   = "/api/power-blocks/place"
 
+# Procura e clica em botoes de rejeitar ofertas/modais
+# Busca por texto em varios idiomas e padroes comuns de fechar modal
+_JS_DISMISS_OFFERS = """
+() => {
+    const DISMISS_TEXTS = [
+        'not now', 'no thanks', 'maybe later', 'skip', 'close', 'dismiss',
+        'agora nao', 'nao agora', 'depois', 'fechar', 'pular',
+    ];
+
+    // Procura todos os botoes visiveis na pagina
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"], a[class*="button"]'));
+    let clicked = 0;
+
+    for (const btn of buttons) {
+        const text = (btn.textContent || btn.innerText || '').trim().toLowerCase();
+        const isVisible = btn.offsetParent !== null && 
+                         getComputedStyle(btn).visibility !== 'hidden' &&
+                         getComputedStyle(btn).display !== 'none';
+        
+        if (!isVisible) continue;
+
+        if (DISMISS_TEXTS.some(t => text === t || text.includes(t))) {
+            btn.click();
+            clicked++;
+        }
+    }
+
+    // Tambem fecha modais com botao X (aria-label="close" ou similar)
+    const closeButtons = document.querySelectorAll(
+        '[aria-label="close"], [aria-label="Close"], [aria-label="fechar"], ' +
+        'button[class*="close"], button[class*="dismiss"], ' +
+        'svg[class*="close"]'
+    );
+    for (const btn of closeButtons) {
+        const isVisible = btn.offsetParent !== null;
+        if (isVisible) { btn.click(); clicked++; }
+    }
+
+    return clicked;
+}
+"""
+
 # Extrai JWT do localStorage
 _JS_GET_TOKEN = r"""
 () => {
@@ -605,6 +647,7 @@ class BotEngine:
         loop_interval: float = 5.0,
         poll_interval: float = 3.0,
         max_figures_per_round: int = 10,
+        auto_dismiss_offers: bool = True,
         on_status: Optional[Callable[[str], None]] = None,
     ):
         self.headless = headless
@@ -612,6 +655,7 @@ class BotEngine:
         self.loop_interval = max(1.0, loop_interval)
         self.poll_interval = max(0.5, poll_interval)
         self.max_figures_per_round = max(1, max_figures_per_round)
+        self.auto_dismiss_offers = auto_dismiss_offers
         self.on_status = on_status or (lambda _: None)
 
         self.browser = BrowserManager(headless=headless)
@@ -794,6 +838,9 @@ class BotEngine:
 
         while self._running and not self._stop_event.is_set():
 
+            # Dispensa modais de oferta automaticamente (se habilitado)
+            self._dismiss_offers()
+
             status, current = self._api.get(CURRENT_PATH)
 
             if status == 0 or current is None:
@@ -879,6 +926,20 @@ class BotEngine:
             return True
         self._emit("Nao foi possivel obter ticket. Verifique a conexao.")
         return False
+
+    def _dismiss_offers(self) -> None:
+        """Clica em 'Not now' / 'Agora nao' em qualquer modal de oferta visivel."""
+        if not self.auto_dismiss_offers:
+            return
+        try:
+            page = self.browser.page
+            if not page:
+                return
+            clicked = self.browser.run_coro(page.evaluate(_JS_DISMISS_OFFERS))
+            if clicked:
+                self._emit(f"[Ofertas] {clicked} modal(is) dispensado(s) automaticamente.")
+        except Exception as e:
+            logger.debug(f"Erro ao dispensar ofertas: {e}")
 
     def _on_socket_win(self, data: dict) -> None:
         """Chamado pelo TicketManager quando o usuario ganhou NMT."""

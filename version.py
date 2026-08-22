@@ -1,4 +1,4 @@
 """version.py — Versao atual do bot."""
 
-__version__ = "1.0.1"
+__version__ = "1.0.3"
 GITHUB_REPO = "BrunoBranc/bot-nmt.gg"
